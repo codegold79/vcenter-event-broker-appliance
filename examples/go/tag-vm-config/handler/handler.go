@@ -96,6 +96,14 @@ func Handle(req handler.Request) (handler.Response, error) {
 		return errRespondAndLog(fmt.Errorf("retrieving VM managed reference object: %w", err)), err
 	}
 
+	currConfigs, err := client.currentConfigs(ctx, *vmMOR)
+	if err != nil {
+		return errRespondAndLog(fmt.Errorf("getting current VM configs: %w", err)), err
+	}
+
+	log.Println("numCPU:", currConfigs.Config.Hardware.NumCPU)
+	log.Println("memory:", currConfigs.Config.Hardware.MemoryMB)
+
 	//vm := object.NewVirtualMachine(client.govmomi.Client, *vmMOR)
 	// TODO: list attached tags and remove any in the cateogry
 	// of the alarm, except for if the tagID matches. If tag id matches,
@@ -103,13 +111,7 @@ func Handle(req handler.Request) (handler.Response, error) {
 
 	err = client.tagMgr.AttachTag(ctx, tagID, vmMOR)
 	if err != nil {
-		wrapErr := fmt.Errorf("tagging managed reference object: %w", err)
-
-		if debug() {
-			log.Println(wrapErr)
-		}
-
-		return errRespondAndLog(wrapErr), err
+		return errRespondAndLog(fmt.Errorf("tagging managed reference object: %w", err)), err
 	}
 
 	message := fmt.Sprintf("%v was tagged with %v, %v", vmMOR.Value, tagID, catID)
@@ -322,6 +324,29 @@ func selectTag(ctx context.Context, ce cloudEvent, moVM mo.VirtualMachine) (stri
 
 	// return the tag ID given the name.
 	return catID, tagID, nil
+}
+
+func (c *vsClient) currentConfigs(ctx context.Context, mor types.ManagedObjectReference) (mo.VirtualMachine, error) {
+	var moVM mo.VirtualMachine
+
+	pc := property.DefaultCollector(client.govmomi.Client)
+	pc.Retrieve(ctx, []types.ManagedObjectReference{mor}, []string{}, &moVM)
+
+	log.Printf("\nvm moRef (vmMOR): %v\n", mor)
+	log.Printf("\nmoVM: %+v\n", moVM)
+	log.Printf("\nclient: %+v\n", client)
+
+	if moVM.Config == nil {
+		err := errors.New("managed object VM Config is empty")
+		return mo.VirtualMachine, err
+	}
+
+	if moVM.Config.Hardware.NumCPU == 0 || moVM.Config.Hardware.MemoryMB == 0 {
+		err := errors.New("managed object VM missing CPU and/or Memory info")
+		return mo.VirtualMachine, err
+	}
+
+	return moVM, nil
 }
 
 // catName returns the category name based on alarm name.
