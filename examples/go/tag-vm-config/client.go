@@ -15,6 +15,7 @@ import (
 type vsClient struct {
 	govmomi *govmomi.Client
 	rest    *rest.Client
+	tagMgr  *tags.Manager
 }
 
 func newClient(ctx context.Context, u url.URL, insecure bool) (*vsClient, error) {
@@ -32,21 +33,14 @@ func newClient(ctx context.Context, u url.URL, insecure bool) (*vsClient, error)
 		return nil, fmt.Errorf("log in to rest api failed: %w", err)
 	}
 
-	return &clt, nil
-}
-
-// moTag adds an existing tag to a VirtualMachine.
-func (clt *vsClient) moTag(ctx context.Context, mor types.ManagedObjectReference, tagID string) error {
-	// Get the tag manager which does the tagging.
-	m := tags.NewManager(clt.rest)
-
-	// Attach tag to VM managed object reference.
-	err := m.AttachTag(ctx, tagID, mor)
+	err, tm := tags.NewManager(clt.rest)
 	if err != nil {
-		return fmt.Errorf("attach tag to VM failed: %w", err)
+		return nil, fmt.Errorf("unable to initialize tag manager: %w", err)
 	}
 
-	return nil
+	clt.tagMgr = tm
+
+	return &clt, nil
 }
 
 func (clt *vsClient) logout(ctx context.Context) error {
