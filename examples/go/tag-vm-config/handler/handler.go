@@ -89,16 +89,14 @@ func Handle(req handler.Request) (handler.Response, error) {
 		return errRespondAndLog(fmt.Errorf("retrieving VM managed reference object: %w", err)), err
 	}
 
-	moVM := moVirtualMachine(ctx, *vmMOR)
-
-	catID, tagID, err := selectTag(ctx, cloudEvt, moVM)
-	if err != nil {
-		return errRespondAndLog(fmt.Errorf("retrieving VM managed reference object: %w", err)), err
-	}
-
 	currConfigs, err := client.currentConfigs(ctx, *vmMOR)
 	if err != nil {
 		return errRespondAndLog(fmt.Errorf("getting current VM configs: %w", err)), err
+	}
+
+	catID, tagID, err := selectTag(ctx, cloudEvt, currConfigs)
+	if err != nil {
+		return errRespondAndLog(fmt.Errorf("retrieving VM managed reference object: %w", err)), err
 	}
 
 	log.Println("numCPU:", currConfigs.Config.Hardware.NumCPU)
@@ -330,7 +328,11 @@ func (c *vsClient) currentConfigs(ctx context.Context, mor types.ManagedObjectRe
 	var moVM mo.VirtualMachine
 
 	pc := property.DefaultCollector(client.govmomi.Client)
-	pc.Retrieve(ctx, []types.ManagedObjectReference{mor}, []string{}, &moVM)
+
+	err := pc.Retrieve(ctx, []types.ManagedObjectReference{mor}, []string{}, &moVM)
+	if err != nil {
+		return mo.VirtualMachine{}, fmt.Errorf("retrieving VM properties: %w", err)
+	}
 
 	log.Printf("\nvm moRef (vmMOR): %v\n", mor)
 	log.Printf("\nmoVM: %+v\n", moVM)
@@ -338,12 +340,12 @@ func (c *vsClient) currentConfigs(ctx context.Context, mor types.ManagedObjectRe
 
 	if moVM.Config == nil {
 		err := errors.New("managed object VM Config is empty")
-		return mo.VirtualMachine, err
+		return mo.VirtualMachine{}, err
 	}
 
 	if moVM.Config.Hardware.NumCPU == 0 || moVM.Config.Hardware.MemoryMB == 0 {
 		err := errors.New("managed object VM missing CPU and/or Memory info")
-		return mo.VirtualMachine, err
+		return mo.VirtualMachine{}, err
 	}
 
 	return moVM, nil
