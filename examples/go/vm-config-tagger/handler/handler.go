@@ -89,19 +89,28 @@ func Handle(req handler.Request) (handler.Response, error) {
 		return errRespondAndLog(fmt.Errorf("getting vm configs: %w", err))
 	}
 
-	tagID, err := vsClient.findIncrementedTag(ctx, cloudEvt, moVM)
+	catID, tagID, err := vsClient.findIncrementedTag(ctx, cloudEvt, moVM)
 	if err != nil {
 		return errRespondAndLog(fmt.Errorf("finding incremented tag: %w", err))
 	}
 
-	// TODO: Check attached tags and remove the ones that don't match tagID.
+	message := "No tag to attach."
 
-	err = vsClient.tagMgr.AttachTag(ctx, tagID, vmMOR)
-	if err != nil {
-		return errRespondAndLog(fmt.Errorf("tagging managed reference object: %w", err))
+	if tagID != "" {
+		// Detach tags in the same catID, but different tagID.
+		err = vsClient.detachTags(ctx, catID, tagID, vmMOR)
+		if err != nil {
+			return errRespondAndLog(fmt.Errorf("detaching old tag(s): %w", err))
+		}
+
+		err = vsClient.tagMgr.AttachTag(ctx, tagID, vmMOR)
+		if err != nil {
+			return errRespondAndLog(fmt.Errorf("tagging managed reference object: %w", err))
+		}
+
+		message = fmt.Sprintf("Attached tag %v.\n", tagID)
 	}
 
-	message := fmt.Sprintf("Attached tag %v\n", tagID)
 	log.Println(message)
 
 	return handler.Response{
@@ -276,7 +285,7 @@ func (c *vsClient) moVirtualMachine(ctx context.Context, mor types.ManagedObject
 
 // findIncrementedTag finds the current config value for the type, and will select
 // the tag that is an increment above it (but below the limits).
-func (clt *vsClient) findIncrementedTag(ctx context.Context, ce cloudEvent, moVM mo.VirtualMachine) (string, error) {
+func (clt *vsClient) findIncrementedTag(ctx context.Context, ce cloudEvent, moVM mo.VirtualMachine) (string, string, error) {
 	catName := catName(ce.Data.Alarm.Name)
 	tagName := ""
 	// get the expected name of the tag (incremented value)
@@ -293,13 +302,13 @@ func (clt *vsClient) findIncrementedTag(ctx context.Context, ce cloudEvent, moVM
 
 	tagList, err := clt.tagMgr.GetTagsForCategory(ctx, catName)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	tagID := findTagID(tagList, tagName)
+	catID, tagID := findCatAndTagIDs(tagList, tagName)
 
 	// return the tag ID given the name.
-	return tagID, nil
+	return catID, tagID, nil
 }
 
 // catName returns the category name based on alarm name.
@@ -320,29 +329,52 @@ func incCpuVal(numCPU int) string {
 	if numCPU < newNum {
 		newNum = numCPU
 	}
+
+	log.Printf("\ncurrent CPU: %v, new CPU: %v\n", numCPU, newNum)
 	return strconv.Itoa(newNum)
 }
 
+// Use MB values, not bytes.
 func incMemVal(mem float64) string {
-	maxExp := 23
+	// 2^13 = 8192. 8GB is max RAM.
+	maxExp := 13
 	newMem := 1 << maxExp
 
-	exp := int(math.Log10(mem) / math.Log10(2))
+	exp := int(math.Round(math.Log10(mem) / math.Log10(2)))
 	exp++
 
 	if exp < maxExp {
 		newMem = 1 << exp
 	}
 
+	log.Printf("\ncurrent memory: %v, new memory: %v\n", mem, newMem)
 	return strconv.Itoa(newMem)
 }
 
-func findTagID(ts []tags.Tag, tn string) string {
+func findCatAndTagIDs(ts []tags.Tag, tn string) (string, string) {
 	for _, t := range ts {
 		if t.Name == tn {
-			return t.ID
+			return t.CategoryID, t.ID
 		}
 	}
 
-	return ""
+	return "", ""
+}
+
+func (clt *vsClient) detachTags(ctx context.Context, catID, tagID string, mor types.ManagedObjectReference) error {
+	tagList, err := clt.tagMgr.GetAttachedTags(ctx, mor)
+	if err != nil {
+		return err
+	}
+
+	// Loop through the tags and detach the ones that are in catID but are not tagID.
+	for _, t := range tagList {
+		if t.CategoryID == catID && t.ID != tagID {
+			if err := clt.tagMgr.DetachTag(ctx, t.ID, mor); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
