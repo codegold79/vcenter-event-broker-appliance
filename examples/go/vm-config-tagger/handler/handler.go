@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 
 	handler "github.com/openfaas/templates-sdk/go-http"
 	"github.com/pelletier/go-toml"
@@ -75,17 +77,31 @@ func Handle(req handler.Request) (handler.Response, error) {
 		return errRespondAndLog(fmt.Errorf("connecting to vSphere: %w", err))
 	}
 
-	vmMOR := types.ManagedObjectReference{
-		Type:  "VirtualMachine",
-		Value: "vm-1047",
+	// Retrieve the Managed Object Reference from the event.
+	vmMOR, err := eventVmMoRef(cloudEvt)
+	if err != nil {
+		return errRespondAndLog(fmt.Errorf("retrieving VM managed reference object: %w", err))
 	}
 
+	// moVM contains the memory and CPU config values.
 	moVM, err := vsClient.moVirtualMachine(ctx, vmMOR)
 	if err != nil {
 		return errRespondAndLog(fmt.Errorf("getting vm configs: %w", err))
 	}
 
-	message := fmt.Sprintf("moVM: %+v\n", moVM)
+	tagID, err := vsClient.findIncrementedTag(ctx, cloudEvt, moVM)
+	if err != nil {
+		return errRespondAndLog(fmt.Errorf("finding incremented tag: %w", err))
+	}
+
+	// TODO: Check attached tags and remove the ones that don't match tagID.
+
+	err = vsClient.tagMgr.AttachTag(ctx, tagID, vmMOR)
+	if err != nil {
+		return errRespondAndLog(fmt.Errorf("tagging managed reference object: %w", err))
+	}
+
+	message := fmt.Sprintf("Attached tag %v\n", tagID)
 	log.Println(message)
 
 	return handler.Response{
@@ -225,22 +241,108 @@ func newClient(ctx context.Context, cfg *vcConfig) (*vsClient, error) {
 	return &vsc, nil
 }
 
+func eventVmMoRef(event cloudEvent) (types.ManagedObjectReference, error) {
+	// Fill information in the request into a govmomi type.
+	moRef := types.ManagedObjectReference{
+		Type:  event.Data.Vm.Vm.Type,
+		Value: event.Data.Vm.Vm.Value,
+	}
+
+	return moRef, nil
+}
+
 // unappliedConfigs returns configurations that are not current.
 func (c *vsClient) moVirtualMachine(ctx context.Context, mor types.ManagedObjectReference) (mo.VirtualMachine, error) {
 	// Look for current hardware configuration
 	var moVM mo.VirtualMachine
 
 	pc := property.DefaultCollector(c.govmomi.Client)
-	pc.Retrieve(ctx, []types.ManagedObjectReference{mor}, []string{}, &moVM)
 
-	log.Printf("\nvm moRef (vmMOR): %v\n", mor)
-	log.Printf("\nmoVM: %+v\n", moVM)
-	log.Printf("\nclient: %+v\n", c)
+	err := pc.Retrieve(ctx, []types.ManagedObjectReference{mor}, []string{}, &moVM)
+	if err != nil {
+		return mo.VirtualMachine{}, err
+	}
 
 	if moVM.Config == nil {
-		log.Printf("\nno config info in vm: %+v\n", moVM)
-		return mo.VirtualMachine{}, errors.New("no config info in vm")
+		return mo.VirtualMachine{}, errors.New("managed object VM Config is empty")
+	}
+
+	if moVM.Config.Hardware.NumCPU == 0 || moVM.Config.Hardware.MemoryMB == 0 {
+		return mo.VirtualMachine{}, errors.New("managed object VM missing CPU and/or Memory info")
 	}
 
 	return moVM, nil
+}
+
+// findIncrementedTag finds the current config value for the type, and will select
+// the tag that is an increment above it (but below the limits).
+func (clt *vsClient) findIncrementedTag(ctx context.Context, ce cloudEvent, moVM mo.VirtualMachine) (string, error) {
+	catName := catName(ce.Data.Alarm.Name)
+	tagName := ""
+	// get the expected name of the tag (incremented value)
+
+	switch catName {
+	case "config.hardware.numCPU":
+		// CPU tags are easy. Just increment it up to the max of 4.
+		tagName = incCpuVal(int(moVM.Config.Hardware.NumCPU))
+	case "config.hardware.memoryMB":
+		// Mem tags are a bit tricky. Gotta find the exponent to the 2 base.
+		// Then, increment the exponent up to the max of 23 (8 gb RAM).
+		tagName = incMemVal(float64(moVM.Config.Hardware.MemoryMB))
+	}
+
+	tagList, err := clt.tagMgr.GetTagsForCategory(ctx, catName)
+	if err != nil {
+		return "", err
+	}
+
+	tagID := findTagID(tagList, tagName)
+
+	// return the tag ID given the name.
+	return tagID, nil
+}
+
+// catName returns the category name based on alarm name.
+func catName(alarmName string) string {
+	switch alarmName {
+	case "VM CPU Usage":
+		return "config.hardware.numCPU"
+	case "VM Memory Usage":
+		return "config.hardware.memoryMB"
+	}
+
+	return ""
+}
+
+func incCpuVal(numCPU int) string {
+	newNum := 4
+	numCPU++
+	if numCPU < newNum {
+		newNum = numCPU
+	}
+	return strconv.Itoa(newNum)
+}
+
+func incMemVal(mem float64) string {
+	maxExp := 23
+	newMem := 1 << maxExp
+
+	exp := int(math.Log10(mem) / math.Log10(2))
+	exp++
+
+	if exp < maxExp {
+		newMem = 1 << exp
+	}
+
+	return strconv.Itoa(newMem)
+}
+
+func findTagID(ts []tags.Tag, tn string) string {
+	for _, t := range ts {
+		if t.Name == tn {
+			return t.ID
+		}
+	}
+
+	return ""
 }
