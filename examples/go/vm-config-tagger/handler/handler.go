@@ -324,13 +324,14 @@ func catName(alarmName string) string {
 }
 
 func incCpuVal(numCPU int) string {
+	log.Printf("\ncurrent CPU: %v.", numCPU)
 	newNum := 4
 	numCPU++
 	if numCPU < newNum {
 		newNum = numCPU
 	}
 
-	log.Printf("\ncurrent CPU: %v, new CPU: %v\n", numCPU, newNum)
+	log.Printf(" New CPU: %v.\n", newNum)
 	return strconv.Itoa(newNum)
 }
 
